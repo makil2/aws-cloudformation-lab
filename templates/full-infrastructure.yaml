@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Template CloudFormation - Infraestrutura completa com VPC, Subnets,
+  Internet Gateway, Security Groups e instância EC2.
+  Desenvolvido como parte do laboratório DIO.
+
+# ============================================================
+#  PARÂMETROS - Valores configuráveis na criação da stack
+# ============================================================
+Parameters:
+
+  Environment:
+    Type: String
+    Description: Nome do ambiente de deploy
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Default: dev
+
+  InstanceType:
+    Type: String
+    Description: Tipo da instância EC2
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t3.micro
+    Default: t2.micro
+
+  ProjectName:
+    Type: String
+    Description: Nome do projeto (usado como prefixo nos recursos)
+    Default: dio-lab
+
+# ============================================================
+#  MAPPINGS - Mapeamento de AMI por região
+# ============================================================
+Mappings:
+
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c02fb55956c7d316   # Amazon Linux 2 - N. Virginia
+    us-west-2:
+      AMI: ami-0ceecbb0f30a902a6   # Amazon Linux 2 - Oregon
+    sa-east-1:
+      AMI: ami-0af6e9042ea5a4e3e   # Amazon Linux 2 - São Paulo
+
+# ============================================================
+#  RECURSOS
+# ============================================================
+Resources:
+
+  # ----------------------------------------------------------
+  #  REDE: VPC
+  # ----------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ----------------------------------------------------------
+  #  REDE: Internet Gateway
+  # ----------------------------------------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw-${Environment}'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ----------------------------------------------------------
+  #  REDE: Subnets
+  # ----------------------------------------------------------
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-public-${Environment}'
+        - Key: Type
+          Value: Public
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-private-${Environment}'
+        - Key: Type
+          Value: Private
+
+  # ----------------------------------------------------------
+  #  REDE: Route Table (Subnet Pública → Internet)
+  # ----------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rtb-public-${Environment}'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ----------------------------------------------------------
+  #  SEGURANÇA: Security Group para Web
+  # ----------------------------------------------------------
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permite acesso HTTP, HTTPS e SSH
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0   # Em produção, restringir ao IP da empresa
+          Description: SSH (restringir em producao)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Todo o trafego de saida permitido
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sg-web-${Environment}'
+
+  # ----------------------------------------------------------
+  #  COMPUTAÇÃO: Instância EC2
+  # ----------------------------------------------------------
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      UserData:
+        # Script executado na inicialização da instância
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Infraestrutura provisionada com CloudFormation!</h1>
+          <p>Ambiente: ${Environment}</p>
+          <p>Projeto: ${ProjectName}</p>" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ec2-web-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+# ============================================================
+#  OUTPUTS - Valores exportados após criação da stack
+# ============================================================
+Outputs:
+
+  VPCId:
+    Description: ID da VPC criada
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-VPCId'
+
+  PublicSubnetId:
+    Description: ID da Subnet Pública
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-PublicSubnetId'
+
+  WebServerPublicIP:
+    Description: IP público da instância EC2
+    Value: !GetAtt WebServer.PublicIp
+
+  WebServerURL:
+    Description: URL do servidor web
+    Value: !Sub 'http://${WebServer.PublicDnsName}'
+
+  WebSecurityGroupId:
+    Description: ID do Security Group Web
+    Value: !Ref WebSecurityGroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WebSGId'
